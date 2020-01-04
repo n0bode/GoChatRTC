@@ -59,7 +59,7 @@ func loadAllStaticFiles(path string) (files map[string][]byte) {
 func showListRoom(session *re.Session, w http.ResponseWriter, r *http.Request) {
 	cursor, err := re.DB("chat").Table("rooms").Run(session)
 	if err != nil {
-		log.Fatal(err)
+		log.Println(err)
 		return
 	}
 
@@ -182,8 +182,11 @@ type Session struct {
 
 func main() {
 	//Flags to command line
-	host := flag.String("address", "", "Public Address")
+	host := flag.String("host", "", "Public Address")
 	port := flag.String("port", "8080", "Public Port Address")
+	dbUser := flag.String("db.username", "", "Admin User RethinkDB")
+	dbPassword := flag.String("db.password", "", "Admin Passwword RethinkDB")
+	dbAddress := flag.String("db.address", "localhost:28015", "Address Rethinkdb")
 	flag.Parse()
 
 	//Getting Path
@@ -217,7 +220,10 @@ func main() {
 
 	//Settings DB
 	session, err := re.Connect(re.ConnectOpts{
-		Address: "localhost:28015",
+		Password: *dbPassword,
+		Username: *dbUser,
+		Address:  *dbAddress,
+		Database: "chat",
 	})
 
 	if err != nil {
@@ -297,7 +303,7 @@ func main() {
 		if err = re.DB("chat").Table("rooms").Get(parms["roomID"]).Update(map[string]interface{}{
 			"peers": re.Row.Field("peers").Append(userID),
 		}).Exec(session); err != nil {
-			log.Fatal(err)
+			log.Println(err)
 			return
 		}
 
@@ -305,13 +311,13 @@ func main() {
 		if err = wsjson.Write(ctx, conn, map[string]interface{}{
 			"event": "offer",
 		}); err != nil {
-			log.Fatal(err)
+			log.Println(err)
 			return
 		}
 
 		offer := make(map[string]interface{})
 		if err = wsjson.Read(ctx, conn, &offer); err != nil {
-			log.Fatal(err)
+			log.Println(err)
 			return
 		}
 
@@ -354,13 +360,13 @@ func main() {
 
 		data := make(map[string]interface{})
 		if err := json.NewDecoder(r.Body).Decode(&data); err != nil {
-			log.Fatal(err)
+			log.Println(err)
 			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
 
 		if !checkSession(sessions, data["session"].(string)) {
-			log.Fatal("Session is not valid")
+			log.Println("Session is not valid")
 			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
@@ -452,7 +458,7 @@ func main() {
 			}).Exec(session)
 		if err != nil {
 			w.WriteHeader(http.StatusBadRequest)
-			log.Fatal(err)
+			log.Println(err)
 			return
 		}
 
@@ -640,7 +646,7 @@ func main() {
 	route.HandleFunc("/users", func(w http.ResponseWriter, r *http.Request) {
 		cursor, err := re.DB("chat").Table("users").Filter(re.Row.Field("id").Fill()).Run(session)
 		if err != nil {
-			log.Fatal(err)
+			log.Println(err)
 			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
@@ -659,14 +665,14 @@ func main() {
 		if userID, ok := parms["userID"]; ok {
 			cursor, err := re.DB("chat").Table("users").Filter(re.Row.Field("userID").Eq(userID)).Run(session)
 			if err != nil {
-				log.Fatal(err)
+				log.Println(err)
 				w.WriteHeader(http.StatusBadRequest)
 				return
 			}
 
 			var user chat.User
 			if err = cursor.One(&user); err != nil {
-				log.Fatal(err)
+				log.Println(err)
 				w.WriteHeader(http.StatusBadRequest)
 				return
 			}
@@ -676,7 +682,7 @@ func main() {
 			user.Invites = nil
 
 			if err = json.NewEncoder(w).Encode(&user); err != nil {
-				log.Fatal(err)
+				log.Println(err)
 				w.WriteHeader(http.StatusBadRequest)
 				return
 			}
