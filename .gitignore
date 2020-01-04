@@ -1,3 +1,4 @@
 *.wasm
 static/chat.wasm
 /.sv
+*.md
