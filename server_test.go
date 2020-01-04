@@ -109,17 +109,23 @@ func TestSendInviteRoom(t *testing.T) {
 
 	var buffer bytes.Buffer
 	invite := map[string]interface{}{
-		"from":    from.UserID,
-		"to":      to.UserID,
-		"session": <-session,
-		"roomID":  "",
+		"to":     to.UserID,
+		"roomID": "",
 	}
 
 	if err := json.NewEncoder(&buffer).Encode(invite); err != nil {
 		t.Fatal(err)
 	}
 
-	resp, err := http.Post("http://localhost:8080/invite", "application/json", &buffer)
+	req, err := http.NewRequest("POST", "http://localhost:8080/invite", &buffer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Add("Content-Type", "application/json")
+	req.Header.Add("Authorization", <-session)
+
+	client := &http.Client{}
+	resp, err := client.Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -152,6 +158,33 @@ func TestCreateRoom(t *testing.T) {
 	}
 }
 
+func TestJoinHub(t *testing.T) {
+	user := make(chan chat.User, 1)
+	t.Run("CreateUser", func(t0 *testing.T) {
+		user <- createUser(genRandNickname(), t0)
+	})
+
+	session := make(chan string, 1)
+	t.Run("Login", func(t0 *testing.T) {
+		session <- loginUser((<-user).SecretKey, t0)
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	header := make(http.Header)
+	header.Set("Authorization", <-session)
+	conn, _, err := websocket.Dial(ctx, "ws://localhost:8080/hub/join", &websocket.DialOptions{
+		HTTPHeader: header,
+	})
+
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close(websocket.StatusInternalError, "Disconnected is normal")
+
+}
+
 func TestJoinRoom(t *testing.T) {
 	users := make(chan chat.User, 2)
 
@@ -164,7 +197,6 @@ func TestJoinRoom(t *testing.T) {
 	})
 
 	var user0 chat.User = <-users
-	var user1 chat.User = <-users
 	sessionChan := make(chan string, 1)
 
 	t.Run("Login", func(t0 *testing.T) {
@@ -181,47 +213,112 @@ func TestJoinRoom(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	conn, _, err := websocket.Dial(ctx, "ws://localhost:8080/rooms/"+<-roomID+"/join", nil)
+	header := make(http.Header)
+	header.Set("Authorization", session)
+	conn, _, err := websocket.Dial(ctx, "ws://localhost:8080/rooms/"+<-roomID+"/join", &websocket.DialOptions{
+		HTTPHeader: header,
+	})
+
 	if err != nil {
 		t.Fatal(err)
 	}
-
 	defer conn.Close(websocket.StatusInternalError, "Disconnected")
-	if err = wsjson.Write(ctx, conn, map[string]interface{}{
-		"session": session,
-		"userID":  user0.UserID,
-	}); err != nil {
-		t.Fatal(err)
-	}
 
 	resp := make(map[string]interface{})
 	if err := wsjson.Read(ctx, conn, &resp); err != nil {
 		t.Fatal(err)
 	}
 
-	if resp["event"].(string) != "offer" {
-		t.Fail()
-		t.Log(user1)
+	if resp["event"].(string) == "send_offer" {
+		peer, err := webrtc.NewPeerConnection(webrtc.Configuration{})
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		offer, err := peer.CreateOffer(nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if err = peer.SetLocalDescription(offer); err != nil {
+			t.Fatal(err)
+		}
+
+		if err = wsjson.Write(ctx, conn, map[string]interface{}{
+			"event": "offer",
+			"offer": offer,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	for {
+		if err := wsjson.Read(ctx, conn, &resp); err != nil {
+			t.Fatal(err)
+		}
+
+		if resp["event"] == "offer" {
+			peer, err := webrtc.NewPeerConnection(webrtc.Configuration{})
+			if err != nil {
+				t.Fail()
+			}
+
+			data, err := json.Marshal(resp["offer"])
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			var offer webrtc.SessionDescription
+			if err = json.Unmarshal(data, &offer); err != nil {
+				t.Fatal(err)
+			}
+
+			if err = peer.SetRemoteDescription(offer); err != nil {
+				t.Fatal(err)
+			}
+
+			answer, err := peer.CreateAnswer(nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			if err = peer.SetLocalDescription(answer); err != nil {
+				t.Fatal(err)
+			}
+
+			if err = wsjson.Write(ctx, conn, map[string]interface{}{
+				"event":     "answer",
+				"answer":    answer,
+				"requester": resp["requester"],
+			}); err != nil {
+				t.Fatal(err)
+			}
+		}
 	}
 }
 
 func createRoom(session, roomName string, t *testing.T) string {
 	var buffer bytes.Buffer
 	json.NewEncoder(&buffer).Encode(map[string]interface{}{
-		"session": session,
-		"roomInfo": map[string]interface{}{
-			"name": roomName,
-		},
+		"roomName": roomName,
 	})
 
-	resp, err := http.Post("http://localhost:8080/rooms", "application/json", &buffer)
+	req, err := http.NewRequest("POST", "http://localhost:8080/rooms", &buffer)
+	if err != nil {
+		t.Fail()
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", session)
+
+	client := &http.Client{}
+	resp, err := client.Do(req)
 	if err != nil {
 		t.Error(err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusCreated {
-		t.Fail()
+		t.Fatal("Error to create room")
 	}
 
 	data := make(map[string]interface{})

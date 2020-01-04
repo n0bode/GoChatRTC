@@ -116,9 +116,9 @@ func makeSession(sessions map[string]Session, expire time.Duration, userID, ark 
 	return
 }
 
-func checkSession(sessions map[string]Session, sessionKey string) (valid bool) {
-	if session, ok := sessions[sessionKey]; ok {
-		if valid = (session.Expire.Sub(time.Now()) >= 0); !valid {
+func checkSession(sessions map[string]Session, sessionKey string) (auth Session, valid bool) {
+	if auth, valid = sessions[sessionKey]; valid {
+		if valid = (auth.Expire.Sub(time.Now()) >= 0); !valid {
 			delete(sessions, sessionKey)
 		}
 	}
@@ -207,7 +207,7 @@ func main() {
 	hub := NewHub()
 
 	//Rooms
-	rooms := make(map[string][]*websocket.Conn)
+	rooms := make(map[string]map[string]*websocket.Conn)
 
 	//Create WebRTC Settings
 	/*config := webrtc.Configuration{
@@ -267,23 +267,24 @@ func main() {
 		ctx, close := context.WithCancel(context.Background())
 		defer close()
 
-		data := make(map[string]interface{})
-		if err = wsjson.Read(ctx, conn, &data); err != nil {
-			log.Println(err)
-			conn.Close(websocket.StatusInternalError, "Websocket read error")
+		token := r.Header.Get("Authorization")
+		if len(token) == 0 {
+			log.Println("Session not especific")
+			w.WriteHeader(http.StatusNonAuthoritativeInfo)
+			conn.Close(websocket.StatusInternalError, "Session not especificed")
 			return
 		}
-		log.Println(data)
 
-		userID := data["userID"].(string)
-		if !checkSession(sessions, data["session"].(string)) {
+		auth, valid := checkSession(sessions, token)
+		if !valid {
 			log.Println("Session is not valid")
+			w.WriteHeader(http.StatusUnauthorized)
 			conn.Close(websocket.StatusInternalError, "Session is not valid")
 			return
 		}
 
 		parms := mux.Vars(r)
-		cursor, err := re.DB("chat").Table("users").Filter(re.Row.Field("userID").Eq(userID)).Count().Run(session)
+		cursor, err := re.DB("chat").Table("users").Filter(re.Row.Field("userID").Eq(auth.UserID)).Count().Run(session)
 		if err != nil {
 			return
 		}
@@ -301,54 +302,58 @@ func main() {
 		}
 
 		if err = re.DB("chat").Table("rooms").Get(parms["roomID"]).Update(map[string]interface{}{
-			"peers": re.Row.Field("peers").Append(userID),
+			"peers": re.Row.Field("peers").Append(auth.UserID),
 		}).Exec(session); err != nil {
 			log.Println(err)
 			return
 		}
 
-		log.Println("Wait offer")
-		if err = wsjson.Write(ctx, conn, map[string]interface{}{
-			"event": "offer",
-		}); err != nil {
-			log.Println(err)
-			return
+		if _, ok := rooms[parms["roomID"]]; !ok {
+			rooms[parms["roomID"]] = make(map[string]*websocket.Conn)
 		}
 
-		offer := make(map[string]interface{})
-		if err = wsjson.Read(ctx, conn, &offer); err != nil {
-			log.Println(err)
-			return
-		}
-
-		answers := make(chan map[string]interface{})
-		go func() {
-			answer := make(map[string]interface{})
-			for {
-				if err := wsjson.Read(ctx, conn, &answer); err != nil {
-					//Remove Conn from list
-				}
-				if answer["event"].(string) == "answer" {
-					answers <- answer["message"].(map[string]interface{})
-					break
-				}
+		//If already exists connected peers
+		if len(rooms[parms["roomID"]]) > 0 {
+			resp := map[string]interface{}{
+				"event": "send_offer",
 			}
-		}()
 
-		for _, peer := range rooms[parms["roomID"]] {
-			wsjson.Write(ctx, peer, map[string]interface{}{
-				"event": "offer",
-				"message": map[string]interface{}{
-					"offer": offer,
-				},
-			})
-		}
-
-		rooms[parms["roomID"]] = append(rooms[parms["roomID"]], conn)
-		for {
-			answer := <-answers
-			if err := wsjson.Write(ctx, conn, answer); err != nil {
+			if err = wsjson.Write(ctx, conn, resp); err != nil {
+				log.Println(err)
 				return
+			}
+
+			if err = wsjson.Read(ctx, conn, &resp); err != nil {
+				log.Println(err)
+				return
+			}
+
+			if resp["event"] != "offer" {
+				log.Println("Error to recv offer, message invalid")
+				return
+			}
+
+			//Set userID
+			resp["message"].(map[string]interface{})["requester"] = auth.UserID
+
+			//Send Offer all peers
+			for _, peer := range rooms[parms["roomID"]] {
+				wsjson.Write(ctx, peer, resp)
+			}
+		}
+		rooms[parms["roomID"]][auth.UserID] = conn
+
+		for {
+			resp := make(map[string]interface{})
+			if err := wsjson.Read(ctx, conn, &resp); err != nil {
+				return
+			}
+
+			if resp["event"] == "answer" {
+				wsjson.Write(ctx, rooms[parms["roomID"]][resp["requester"].(string)], map[string]interface{}{
+					"answer": resp["answer"],
+					"from":   auth.UserID,
+				})
 			}
 		}
 	})
@@ -358,6 +363,20 @@ func main() {
 		setHeaderJSON(w)
 		defer r.Body.Close()
 
+		token := r.Header.Get("Authorization")
+		if len(token) == 0 {
+			log.Println("Token not specificated")
+			w.WriteHeader(http.StatusNonAuthoritativeInfo)
+			return
+		}
+
+		auth, valid := checkSession(sessions, token)
+		if !valid {
+			log.Println("Session is not valid")
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+
 		data := make(map[string]interface{})
 		if err := json.NewDecoder(r.Body).Decode(&data); err != nil {
 			log.Println(err)
@@ -365,15 +384,10 @@ func main() {
 			return
 		}
 
-		if !checkSession(sessions, data["session"].(string)) {
-			log.Println("Session is not valid")
-			w.WriteHeader(http.StatusBadRequest)
-			return
-		}
-
 		result, err := re.DB("chat").Table("rooms").Insert(map[string]interface{}{
-			"name":  data["roomInfo"].(map[string]interface{})["name"],
+			"name":  data["roomName"],
 			"users": []string{},
+			"owner": auth.UserID,
 		}).RunWrite(session)
 
 		if err != nil {
@@ -422,37 +436,38 @@ func main() {
 	route.HandleFunc("/invite", func(w http.ResponseWriter, r *http.Request) {
 		setHeaderJSON(w)
 
-		values := make(map[string]interface{})
-		if err := json.NewDecoder(r.Body).Decode(&values); err != nil {
+		token := r.Header.Get("Authorization")
+		if len(token) == 0 {
+			w.WriteHeader(http.StatusNonAuthoritativeInfo)
+			log.Println("Session not specificted")
+			return
+		}
+
+		auth, valid := checkSession(sessions, token)
+		if !valid {
+			log.Println("Session key is not valid")
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+
+		resp := make(map[string]interface{})
+		if err := json.NewDecoder(r.Body).Decode(&resp); err != nil {
 			log.Println(err)
 			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
 
-		if values["to"] == values["from"] {
-			w.WriteHeader(http.StatusBadRequest)
-			return
-		}
-
-		sessionKey, ok := values["session"]
-		if !ok {
-			w.WriteHeader(http.StatusBadRequest)
-			log.Println("Session not specificted")
-			return
-		}
-
-		if !checkSession(sessions, sessionKey.(string)) {
-			log.Println("Session key is not valid")
+		if auth.UserID == resp["to"] {
 			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
 
 		inviteInfo := map[string]interface{}{
-			"roomID": values["roomID"],
-			"from":   values["from"],
+			"roomID": resp["roomID"],
+			"from":   auth.UserID,
 		}
 
-		err := re.DB("chat").Table("users").Filter(re.Row.Field("userID").Eq(values["to"])).Update(
+		err := re.DB("chat").Table("users").Filter(re.Row.Field("userID").Eq(resp["to"])).Update(
 			map[string]interface{}{
 				"invites": re.Row.Field("invites").Append(inviteInfo),
 			}).Exec(session)
@@ -465,11 +480,25 @@ func main() {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 
-		hub.WriteTo(ctx, "invite", inviteInfo, values["to"].(string))
+		hub.WriteTo(ctx, "invite", inviteInfo, resp["to"].(string))
 		w.WriteHeader(http.StatusCreated)
 	}).Methods("POST")
 
-	route.HandleFunc("/hub", func(w http.ResponseWriter, r *http.Request) {
+	route.HandleFunc("/hub/join", func(w http.ResponseWriter, r *http.Request) {
+		token := r.Header.Get("Authorization")
+		if len(token) == 0 {
+			log.Println("Token is not especificed")
+			w.WriteHeader(http.StatusNonAuthoritativeInfo)
+			return
+		}
+
+		auth, valid := checkSession(sessions, token)
+		if !valid {
+			log.Println("Session is not valid")
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+
 		conn, err := websocket.Accept(w, r, nil)
 		if err != nil {
 			log.Println(err)
@@ -487,14 +516,7 @@ func main() {
 			return
 		}
 
-		userID := data["userID"].(string)
-		if !checkSession(sessions, data["session"].(string)) {
-			log.Println("Session is not valid")
-			conn.Close(websocket.StatusInternalError, "Session is not valid")
-			return
-		}
-
-		cursor, err := re.DB("chat").Table("users").Filter(re.Row.Field("userID").Eq(userID)).Count().Run(session)
+		cursor, err := re.DB("chat").Table("users").Filter(re.Row.Field("userID").Eq(auth.UserID)).Count().Run(session)
 		if err != nil {
 			conn.Close(websocket.StatusInternalError, "DB error")
 			log.Println(err)
@@ -515,11 +537,11 @@ func main() {
 		}
 
 		//Connected to HUB
-		hub.Add(userID, conn)
+		hub.Add(auth.UserID, conn)
 		for {
 			if err = wsjson.Read(ctx, conn, &data); err != nil {
-				hub.Rem(userID)
-				log.Printf("Disconnected from hub: %s\n", userID)
+				hub.Rem(auth.UserID)
+				log.Printf("Disconnected from hub: %s\n", auth.UserID)
 				return
 			}
 		}

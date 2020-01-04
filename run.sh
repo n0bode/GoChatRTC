@@ -14,6 +14,28 @@ if ! GOOS=js GOARCH=wasm go build -o static/chat.wasm webassembly/chatwasm.go; t
   exit 1
 fi
 echo "Executing Server"
-./sv -host "$HOST" -port "$PORT"
-rm ./sv
-rm static/chat.wasm
+
+clear(){
+  rm ./sv
+  rm static/chat.wasm
+  exit
+}
+
+while [ ! $# -eq 0 ]
+do
+  case $1 in
+  --port|-p) PORT=$2;;
+  --host|-h) HOST=$2;;
+  --db.user) DB_USER=$2;;
+  --db.password) DB_PASSWORD=$2;;
+  --db.address) DB_ADDRESS=$2;;
+  --help)
+    ./sv --help 
+    clear
+    ;;
+  esac
+  shift
+done
+
+./sv -host "$HOST" -port "$PORT" -db.username "$DB_USER" -db.password "$DB_PASSWORD" -db.address "$DB_ADRESS"
+clear()
