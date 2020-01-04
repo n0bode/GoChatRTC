@@ -1,8 +1,9 @@
 # Chat peer to peer (p2p) powered
-. RethinkDB as Main Database
-. Golang as Main Language
-. Html/Css as Front
-. WebAssembly as Client-Side/Communication
+
+- RethinkDB as Main Database
+- Golang as Main Language
+- Html/Css as Front
+- WebAssembly as Client-Side/Communication
 
 # Golang packages
 
