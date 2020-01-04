@@ -1,5 +1,7 @@
 # Chat peer to peer (p2p) powered
 
+# [Project in building]
+
 - RethinkDB as Main Database
 - Golang as Main Language
 - Html/Css as Front
