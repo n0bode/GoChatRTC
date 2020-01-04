@@ -1,0 +1,1 @@
+docker run --name db --rm -p 28015:28015 -p 9000:8080 rethinkdb &
