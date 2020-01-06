@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"fmt"
 	"math/rand"
 	"net/http"
 	"testing"
@@ -196,28 +195,20 @@ func TestJoinRoom(t *testing.T) {
 		users <- createUser(genRandNickname(), t0)
 	})
 
-	croomID := make(chan string, 1)
-
 	t.Run("Login0", func(t0 *testing.T) {
 		t0.Parallel()
 		var token string = loginUser((<-users).SecretKey, t0)
-		var roomID string = <-croomID
-		croomID <- roomID
 		t.Run("Join Room 0", func(t1 *testing.T) {
-			joinRoom(token, roomID, t1)
+			joinRoom(token, "b22b1189-2332-40af-8fb2-df84e637cbdf", t1)
 		})
 	})
 
 	t.Run("Login1", func(t0 *testing.T) {
 		t0.Parallel()
 		var token string = loginUser((<-users).SecretKey, t0)
-		t.Run("Create Room", func(t1 *testing.T) {
-			croomID <- createRoom(token, "ROOM 101", t1)
-		})
 
-		var roomID string = <-croomID
 		t.Run("Join Room 1", func(t1 *testing.T) {
-			joinRoom(token, roomID, t1)
+			joinRoom(token, "b22b1189-2332-40af-8fb2-df84e637cbdf", t1)
 		})
 	})
 }
@@ -322,6 +313,7 @@ func joinRoom(token, roomID string, t *testing.T) {
 
 	header := make(http.Header)
 	header.Set("Authorization", token)
+
 	conn, _, err := websocket.Dial(ctx, "ws://localhost:8080/rooms/"+roomID+"/join", &websocket.DialOptions{
 		HTTPHeader: header,
 	})
@@ -330,41 +322,43 @@ func joinRoom(token, roomID string, t *testing.T) {
 		t.Fatal(err)
 	}
 	defer conn.Close(websocket.StatusInternalError, "Disconnected")
-	resp := make(map[string]interface{})
-	if err := wsjson.Read(ctx, conn, &resp); err != nil {
-		t.Fatal(err)
-	}
+	var sucess bool
 
-	if resp["event"] == "send_offer" {
-		peer, err := webrtc.NewPeerConnection(webrtc.Configuration{})
-		if err != nil {
-			t.Fatal(err)
-		}
-
-		offer, err := peer.CreateOffer(nil)
-		if err != nil {
-			t.Fatal(err)
-		}
-
-		if err = peer.SetLocalDescription(offer); err != nil {
-			t.Fatal(err)
-		}
-
-		if err = wsjson.Write(ctx, conn, map[string]interface{}{
-			"event": "offer",
-			"offer": offer,
-		}); err != nil {
-			t.Fatal(err)
-		}
-	}
-
+	peers := make(map[string]*webrtc.PeerConnection)
 	for {
-		fmt.Println("WAIT")
+		resp := make(map[string]interface{})
 		if err := wsjson.Read(ctx, conn, &resp); err != nil {
+			if sucess {
+				return
+			}
 			t.Fatal(err)
 		}
-		fmt.Println("Receive")
-		if resp["event"] == "offer" {
+
+		switch resp["event"] {
+		case "create_offer":
+			peer, err := webrtc.NewPeerConnection(webrtc.Configuration{})
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			offer, err := peer.CreateOffer(nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			if err = peer.SetLocalDescription(offer); err != nil {
+				t.Fatal(err)
+			}
+
+			resp["event"] = "offer"
+			resp["offer"] = offer
+			if err = wsjson.Write(ctx, conn, resp); err != nil {
+				t.Fatal(err)
+			}
+			peers[resp["peerID"].(string)] = peer
+			//fmt.Println("Created offer")
+		case "offer":
+			//fmt.Println("Recv offer")
 			peer, err := webrtc.NewPeerConnection(webrtc.Configuration{})
 			if err != nil {
 				t.Fail()
@@ -374,6 +368,7 @@ func joinRoom(token, roomID string, t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			delete(resp, "offer")
 
 			var offer webrtc.SessionDescription
 			if err = json.Unmarshal(data, &offer); err != nil {
@@ -393,13 +388,57 @@ func joinRoom(token, roomID string, t *testing.T) {
 				t.Fatal(err)
 			}
 
-			if err = wsjson.Write(ctx, conn, map[string]interface{}{
-				"event":     "answer",
-				"answer":    answer,
-				"requester": resp["requester"],
-			}); err != nil {
+			peer.OnDataChannel(func(room *webrtc.DataChannel) {
+				room.OnOpen(func() {
+					room.SendText("Sucess")
+				})
+
+				room.OnMessage(func(msg webrtc.DataChannelMessage) {
+					sucess = true
+					conn.Close(websocket.StatusGoingAway, "Sucess")
+				})
+			})
+
+			resp["event"] = "answer"
+			resp["answer"] = answer
+			if err = wsjson.Write(ctx, conn, resp); err != nil {
 				t.Fatal(err)
 			}
+		case "answer":
+			peer, ok := peers[resp["peerID"].(string)]
+			if !ok {
+				t.Fatal("Missing peer")
+			}
+
+			data, err := json.Marshal(resp["answer"])
+			if err != nil {
+				t.Fatal(err)
+			}
+			delete(resp, "offer")
+
+			var answer webrtc.SessionDescription
+			if err = json.Unmarshal(data, &answer); err != nil {
+				t.Fatal(err)
+			}
+
+			if err := peer.SetRemoteDescription(answer); err != nil {
+				t.Fatal(err)
+			}
+
+			room, err := peer.CreateDataChannel("rrom", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			room.OnOpen(func() {
+				room.SendText("Sucess")
+			})
+
+			room.OnMessage(func(msg webrtc.DataChannelMessage) {
+				sucess = true
+				conn.Close(websocket.StatusGoingAway, "Sucess")
+
+			})
 		}
 	}
 }

@@ -125,6 +125,87 @@ func checkToken(sessions map[string]Session, sessionKey string) (auth Session, v
 	return
 }
 
+type Room struct {
+	conns map[string]*websocket.Conn
+	m     *sync.RWMutex
+}
+
+func (r *Room) Store(userID string, conn *websocket.Conn) {
+	r.m.Lock()
+	defer r.m.Unlock()
+	r.conns[userID] = conn
+}
+
+func (r *Room) Load(userID string) (conn *websocket.Conn, ok bool) {
+	r.m.RLock()
+	defer r.m.RUnlock()
+	conn, ok = r.conns[userID]
+	return
+}
+
+func (r *Room) Delete(userID string) {
+	r.m.Lock()
+	defer r.m.Lock()
+	delete(r.conns, userID)
+}
+
+func (r *Room) Range(rfunc func(userID string, conn *websocket.Conn)) {
+	r.m.RLock()
+	defer r.m.RUnlock()
+	for key, conn := range r.conns {
+		rfunc(key, conn)
+	}
+}
+
+func (r *Room) Length() int {
+	r.m.RLock()
+	defer r.m.RUnlock()
+	return len(r.conns)
+}
+
+func NewRoom() *Room {
+	return &Room{
+		conns: make(map[string]*websocket.Conn),
+		m:     &sync.RWMutex{},
+	}
+}
+
+type RoomManager struct {
+	rooms map[string]*Room
+	m     *sync.RWMutex
+}
+
+func (rm *RoomManager) Store(roomID string) (room *Room) {
+	rm.m.Lock()
+	defer rm.m.Unlock()
+
+	if _, ok := rm.rooms[roomID]; !ok {
+		room = NewRoom()
+		rm.rooms[roomID] = room
+	}
+	return
+}
+
+func (rm *RoomManager) Load(roomID string) (room *Room, ok bool) {
+	rm.m.RLock()
+	defer rm.m.RUnlock()
+	room, ok = rm.rooms[roomID]
+	return
+}
+
+func (rm *RoomManager) Delete(roomID string) {
+	rm.m.Lock()
+	defer rm.m.Unlock()
+	delete(rm.rooms, roomID)
+}
+
+func NewRoomManager() *RoomManager {
+	return &RoomManager{
+		rooms: make(map[string]*Room),
+		m:     &sync.RWMutex{},
+	}
+}
+
 type SessionManager struct {
 	m        *sync.RWMutex
 	ark      string
@@ -243,7 +324,7 @@ func main() {
 	hub := NewHub()
 
 	//Rooms
-	rooms := make(map[string]map[string]*websocket.Conn)
+	rooms := NewRoomManager()
 
 	//Create WebRTC Settings
 	/*config := webrtc.Configuration{
@@ -344,67 +425,71 @@ func main() {
 			return
 		}
 
-		if _, ok := rooms[parms["roomID"]]; !ok {
-			rooms[parms["roomID"]] = make(map[string]*websocket.Conn)
+		room, exists := rooms.Load(parms["roomID"])
+		//If the room not exists yet
+		if !exists {
+			room = rooms.Store(parms["roomID"])
 		}
 
 		wait := make(chan int, 1)
-		receiver := make(chan int, 1)
+
+		//If already exists connected peers
+		if room.Length() > 0 {
+			//Set userID
+			resp := map[string]interface{}{
+				"event":     "create_offer",
+				"requester": auth.UserID,
+			}
+
+			//Send Offer all peer
+			room.Range(func(userID string, peer *websocket.Conn) {
+				if userID == auth.UserID {
+					return
+				}
+
+				resp["peerID"] = userID
+				if err = wsjson.Write(ctx, conn, resp); err != nil {
+					log.Println(err)
+					return
+				}
+			})
+		}
+		room.Store(auth.UserID, conn)
 
 		go func() {
 			ctx, cancel := context.WithCancel(context.Background())
+			resp := make(map[string]interface{})
+
 			defer cancel()
-			<-receiver
 			for {
-				resp := make(map[string]interface{})
 				if err := wsjson.Read(ctx, conn, &resp); err != nil {
 					log.Println(err)
 					wait <- 0
 					return
 				}
-				if resp["event"] == "answer" {
-					wsjson.Write(ctx, rooms[parms["roomID"]][resp["requester"].(string)], map[string]interface{}{
-						"answer": resp["answer"],
-						"from":   auth.UserID,
-					})
+
+				switch resp["event"] {
+				case "answer":
+					peer, exists := room.Load(resp["requester"].(string))
+					if !exists {
+						continue
+					}
+					wsjson.Write(ctx, peer, resp)
+					fmt.Println("Recv Answer")
+				case "offer":
+					peer, exists := room.Load(resp["peerID"].(string))
+					if !exists {
+						continue
+					}
+					if err := wsjson.Write(ctx, peer, resp); err != nil {
+						fmt.Println(err)
+					}
+					log.Println("Sent offer")
 				}
 			}
 		}()
 
-		//If already exists connected peers
-		if len(rooms[parms["roomID"]]) > 0 {
-			resp := map[string]interface{}{
-				"event": "send_offer",
-			}
-
-			if err = wsjson.Write(ctx, conn, resp); err != nil {
-				log.Println(err)
-				return
-			}
-
-			if err = wsjson.Read(ctx, conn, &resp); err != nil {
-				log.Println(err)
-				return
-			}
-
-			if resp["event"] != "offer" {
-				log.Println("Error to recv offer, message invalid")
-				return
-			}
-
-			//Set userID
-			resp["requester"] = auth.UserID
-			//Send Offer all peer
-			time.Sleep(time.Second * 5)
-			for userID, peer := range rooms[parms["roomID"]] {
-				fmt.Printf("Sent to '%s'\n", userID)
-				if err := wsjson.Write(ctx, peer, resp); err != nil {
-					fmt.Println(err)
-				}
-			}
-		}
-		receiver <- 1
-		rooms[parms["roomID"]][auth.UserID] = conn
+		room.Store(auth.UserID, conn)
 		<-wait
 	})
 

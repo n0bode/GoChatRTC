@@ -5,7 +5,7 @@ DB_PASSWORD=
 DB_ADDRESS=localhost:28015
 
 echo "Building Server..."
-if ! go build -o sv server.go; then
+if ! go build -o sv.bin server.go; then
   exit 1
 fi
 
@@ -16,7 +16,7 @@ fi
 echo "Executing Server"
 
 clear(){
-  rm ./sv
+  rm ./sv.bin
   rm static/chat.wasm
   exit
 }
@@ -37,5 +37,5 @@ do
   shift
 done
 
-./sv -host "$HOST" -port "$PORT" -db.username "$DB_USER" -db.password "$DB_PASSWORD" -db.address "$DB_ADRESS"
+./sv.bin -host "$HOST" -port "$PORT" -db.username "$DB_USER" -db.password "$DB_PASSWORD" -db.address "$DB_ADRESS"
 clear()
