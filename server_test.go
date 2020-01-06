@@ -195,11 +195,12 @@ func TestJoinRoom(t *testing.T) {
 		users <- createUser(genRandNickname(), t0)
 	})
 
+	var roomID string = "52bdcbe0-25c9-4a33-ab2b-26acee13b239"
 	t.Run("Login0", func(t0 *testing.T) {
 		t0.Parallel()
 		var token string = loginUser((<-users).SecretKey, t0)
 		t.Run("Join Room 0", func(t1 *testing.T) {
-			joinRoom(token, "b22b1189-2332-40af-8fb2-df84e637cbdf", t1)
+			joinRoom(token, roomID, t1)
 		})
 	})
 
@@ -208,7 +209,7 @@ func TestJoinRoom(t *testing.T) {
 		var token string = loginUser((<-users).SecretKey, t0)
 
 		t.Run("Join Room 1", func(t1 *testing.T) {
-			joinRoom(token, "b22b1189-2332-40af-8fb2-df84e637cbdf", t1)
+			joinRoom(token, roomID, t1)
 		})
 	})
 }
@@ -336,7 +337,12 @@ func joinRoom(token, roomID string, t *testing.T) {
 
 		switch resp["event"] {
 		case "create_offer":
-			peer, err := webrtc.NewPeerConnection(webrtc.Configuration{})
+			var config webrtc.Configuration
+			if err := json.Unmarshal([]byte(resp["config"].(string)), &config); err != nil {
+				t.Fatal(err)
+			}
+
+			peer, err := webrtc.NewPeerConnection(config)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -358,8 +364,13 @@ func joinRoom(token, roomID string, t *testing.T) {
 			peers[resp["peerID"].(string)] = peer
 			//fmt.Println("Created offer")
 		case "offer":
+			var config webrtc.Configuration
+			if err := json.Unmarshal([]byte(resp["config"].(string)), &config); err != nil {
+				t.Fatal(err)
+			}
+
 			//fmt.Println("Recv offer")
-			peer, err := webrtc.NewPeerConnection(webrtc.Configuration{})
+			peer, err := webrtc.NewPeerConnection(config)
 			if err != nil {
 				t.Fail()
 			}

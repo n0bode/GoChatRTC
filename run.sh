@@ -29,10 +29,6 @@ do
   --db.user) DB_USER=$2;;
   --db.password) DB_PASSWORD=$2;;
   --db.address) DB_ADDRESS=$2;;
-  --help)
-    ./sv --help 
-    clear
-    ;;
   esac
   shift
 done

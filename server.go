@@ -327,13 +327,13 @@ func main() {
 	rooms := NewRoomManager()
 
 	//Create WebRTC Settings
-	/*config := webrtc.Configuration{
-		ICEServers: []webrtc.ICEServer{
-			webrtc.ICEServer{
-				URLs: []string{"stun:stun.l.google.com:19302"},
+	configRTC, err := json.Marshal(map[string]interface{}{
+		"iceServers": []map[string]interface{}{
+			map[string]interface{}{
+				"urls": []string{"stun:stun.l.google.com:19302"},
 			},
 		},
-	}*/
+	})
 
 	//Settings DB
 	session, err := re.Connect(re.ConnectOpts{
@@ -372,6 +372,10 @@ func main() {
 		w.Write(staticFiles["/testjoin.js"])
 	}).Methods("GET")
 
+	route.HandleFunc("/configRTC", func(w http.ResponseWriter, r *http.Request) {
+		w.Write(configRTC)
+	}).Methods("GET")
+
 	/*** Create Room  ***/
 	route.HandleFunc("/rooms/{roomID}/join", func(w http.ResponseWriter, r *http.Request) {
 		conn, err := websocket.Accept(w, r, nil)
@@ -401,27 +405,13 @@ func main() {
 		}
 
 		parms := mux.Vars(r)
-		cursor, err := re.DB("chat").Table("users").Filter(re.Row.Field("userID").Eq(auth.UserID)).Count().Run(session)
-		if err != nil {
-			return
-		}
-
-		cursor, err = re.DB("chat").Table("rooms").Get(parms["roomID"]).Run(session)
-		if err != nil {
+		info, err := re.DB("chat").Table("rooms").Get(parms["roomID"]).Update(
+			map[string]interface{}{
+				"peers": re.Row.Field("peers").SetInsert(auth.UserID),
+			},
+		).RunWrite(session)
+		if err != nil || info.Skipped == 1 {
 			conn.Close(websocket.StatusInternalError, "Room not exists")
-			return
-		}
-
-		var roomInfo chat.Room
-		if err = cursor.One(&roomInfo); err != nil {
-			log.Println(err)
-			return
-		}
-
-		if err = re.DB("chat").Table("rooms").Get(parms["roomID"]).Update(map[string]interface{}{
-			"peers": re.Row.Field("peers").Append(auth.UserID),
-		}).Exec(session); err != nil {
-			log.Println(err)
 			return
 		}
 
@@ -439,7 +429,9 @@ func main() {
 			resp := map[string]interface{}{
 				"event":     "create_offer",
 				"requester": auth.UserID,
+				"config":    string(configRTC),
 			}
+			log.Println("connected")
 
 			//Send Offer all peer
 			room.Range(func(userID string, peer *websocket.Conn) {
@@ -521,7 +513,7 @@ func main() {
 
 		result, err := re.DB("chat").Table("rooms").Insert(map[string]interface{}{
 			"name":  data["roomName"],
-			"users": []string{},
+			"peers": []string{},
 			"owner": auth.UserID,
 		}).RunWrite(session)
 
@@ -656,6 +648,11 @@ func main() {
 		if err != nil {
 			conn.Close(websocket.StatusInternalError, "DB error")
 			log.Println(err)
+			return
+		}
+
+		if cursor.IsNil() {
+			conn.Close(websocket.StatusInternalError, "User not exists")
 			return
 		}
 
