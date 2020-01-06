@@ -22,9 +22,8 @@
 
 # How to Compile it
 > If all is alright, you just run use this command in your shell intepreter
-` >> chmod 777 ./run.sh
-  >> run.sh [--port] [--ip] [--db.user] [--db.password] 
-`
+` >> chmod 777 ./run.sh `
+` >> run.sh [--port] [--ip] [--db.user] [--db.password] `
 
 # How to Initialize Database (RethinkDB)
 ` >> docker run --name db -p 28015:28015 -p 9000:8080 rethinkdb `
