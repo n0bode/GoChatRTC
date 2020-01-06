@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"flag"
+	"fmt"
 	"io/ioutil"
 	"log"
 	"math/rand"
@@ -13,7 +14,6 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"strconv"
 	"sync"
 	"time"
 
@@ -106,23 +106,60 @@ func revalidateSession(session *re.Session, sessionKey string, user *chat.User) 
 	return true
 }
 
-func makeSession(sessions map[string]Session, expire time.Duration, userID, ark string) (key string) {
+func makeToken(sessions map[string]Session, expire time.Duration, userID, ark string) (token string) {
 	var expireTime time.Time = time.Now().Add(expire)
-	key = chat.EncodeToSha(ark + userID)
-	sessions[key] = Session{
+	token = chat.EncodeToSha(ark + userID)
+	sessions[token] = Session{
 		Expire: expireTime,
 		UserID: userID,
 	}
 	return
 }
 
-func checkSession(sessions map[string]Session, sessionKey string) (auth Session, valid bool) {
+func checkToken(sessions map[string]Session, sessionKey string) (auth Session, valid bool) {
 	if auth, valid = sessions[sessionKey]; valid {
 		if valid = (auth.Expire.Sub(time.Now()) >= 0); !valid {
 			delete(sessions, sessionKey)
 		}
 	}
 	return
+}
+
+type SessionManager struct {
+	m        *sync.RWMutex
+	ark      string
+	sessions map[string]Session
+}
+
+func (sm *SessionManager) Add(expire time.Duration, userID string) (token string) {
+	var future time.Time = time.Now().Add(expire)
+	token = chat.EncodeToSha(sm.ark + userID)
+	sm.m.Lock()
+	sm.sessions[token] = Session{
+		Expire: future,
+		UserID: userID,
+	}
+	sm.m.Unlock()
+	return
+}
+
+func (sm *SessionManager) IsValid(token string) (auth Session, valid bool) {
+	sm.m.RLock()
+	if auth, valid = sm.sessions[token]; valid {
+		if valid = (auth.Expire.Sub(time.Now()) >= 0); !valid {
+			delete(sm.sessions, token)
+		}
+	}
+	sm.m.RUnlock()
+	return
+}
+
+func NewSessionManager() *SessionManager {
+	return &SessionManager{
+		ark:      chat.EncodeToSha(time.Now().Add(time.Second * time.Duration(rand.Int())).Format(time.RFC3339Nano)),
+		sessions: make(map[string]Session),
+		m:        &sync.RWMutex{},
+	}
 }
 
 type Hub struct {
@@ -200,8 +237,7 @@ func main() {
 	log.Printf("Read '%d' files\n", len(staticFiles))
 
 	//Session
-	var sessions map[string]Session = make(map[string]Session)
-	var ark string = chat.EncodeToSha(strconv.Itoa(rand.Int()) + time.Now().Format(time.RFC3339))
+	sessionManager := NewSessionManager()
 
 	//Hub connecteds
 	hub := NewHub()
@@ -255,7 +291,7 @@ func main() {
 		w.Write(staticFiles["/testjoin.js"])
 	}).Methods("GET")
 
-	//Connect to ROOM
+	/*** Create Room  ***/
 	route.HandleFunc("/rooms/{roomID}/join", func(w http.ResponseWriter, r *http.Request) {
 		conn, err := websocket.Accept(w, r, nil)
 		if err != nil {
@@ -275,7 +311,7 @@ func main() {
 			return
 		}
 
-		auth, valid := checkSession(sessions, token)
+		auth, valid := sessionManager.IsValid(token)
 		if !valid {
 			log.Println("Session is not valid")
 			w.WriteHeader(http.StatusUnauthorized)
@@ -312,6 +348,29 @@ func main() {
 			rooms[parms["roomID"]] = make(map[string]*websocket.Conn)
 		}
 
+		wait := make(chan int, 1)
+		receiver := make(chan int, 1)
+
+		go func() {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			<-receiver
+			for {
+				resp := make(map[string]interface{})
+				if err := wsjson.Read(ctx, conn, &resp); err != nil {
+					log.Println(err)
+					wait <- 0
+					return
+				}
+				if resp["event"] == "answer" {
+					wsjson.Write(ctx, rooms[parms["roomID"]][resp["requester"].(string)], map[string]interface{}{
+						"answer": resp["answer"],
+						"from":   auth.UserID,
+					})
+				}
+			}
+		}()
+
 		//If already exists connected peers
 		if len(rooms[parms["roomID"]]) > 0 {
 			resp := map[string]interface{}{
@@ -334,28 +393,19 @@ func main() {
 			}
 
 			//Set userID
-			resp["message"].(map[string]interface{})["requester"] = auth.UserID
-
-			//Send Offer all peers
-			for _, peer := range rooms[parms["roomID"]] {
-				wsjson.Write(ctx, peer, resp)
+			resp["requester"] = auth.UserID
+			//Send Offer all peer
+			time.Sleep(time.Second * 5)
+			for userID, peer := range rooms[parms["roomID"]] {
+				fmt.Printf("Sent to '%s'\n", userID)
+				if err := wsjson.Write(ctx, peer, resp); err != nil {
+					fmt.Println(err)
+				}
 			}
 		}
+		receiver <- 1
 		rooms[parms["roomID"]][auth.UserID] = conn
-
-		for {
-			resp := make(map[string]interface{})
-			if err := wsjson.Read(ctx, conn, &resp); err != nil {
-				return
-			}
-
-			if resp["event"] == "answer" {
-				wsjson.Write(ctx, rooms[parms["roomID"]][resp["requester"].(string)], map[string]interface{}{
-					"answer": resp["answer"],
-					"from":   auth.UserID,
-				})
-			}
-		}
+		<-wait
 	})
 
 	//Create room
@@ -370,7 +420,7 @@ func main() {
 			return
 		}
 
-		auth, valid := checkSession(sessions, token)
+		auth, valid := sessionManager.IsValid(token)
 		if !valid {
 			log.Println("Session is not valid")
 			w.WriteHeader(http.StatusUnauthorized)
@@ -402,7 +452,7 @@ func main() {
 		})
 	}).Methods("POST")
 
-	//Room Info
+	/* Room Get Info */
 	route.HandleFunc("/rooms/{roomID}", func(w http.ResponseWriter, r *http.Request) {
 		setHeaderJSON(w)
 		defer r.Body.Close()
@@ -443,7 +493,7 @@ func main() {
 			return
 		}
 
-		auth, valid := checkSession(sessions, token)
+		auth, valid := sessionManager.IsValid(token)
 		if !valid {
 			log.Println("Session key is not valid")
 			w.WriteHeader(http.StatusUnauthorized)
@@ -484,6 +534,7 @@ func main() {
 		w.WriteHeader(http.StatusCreated)
 	}).Methods("POST")
 
+	/*** JOIN HUB ***/
 	route.HandleFunc("/hub/join", func(w http.ResponseWriter, r *http.Request) {
 		token := r.Header.Get("Authorization")
 		if len(token) == 0 {
@@ -492,7 +543,7 @@ func main() {
 			return
 		}
 
-		auth, valid := checkSession(sessions, token)
+		auth, valid := sessionManager.IsValid(token)
 		if !valid {
 			log.Println("Session is not valid")
 			w.WriteHeader(http.StatusUnauthorized)
@@ -576,7 +627,7 @@ func main() {
 			return
 		}
 
-		sessionKey := makeSession(sessions, time.Minute*15, user.UserID, ark)
+		token := sessionManager.Add(time.Minute*15, user.UserID)
 		re.DB("chat").Table("users").Get(user.ID).Update(map[string]interface{}{
 			"lasttime": time.Now().Format(time.RFC3339),
 		}).Exec(session)
@@ -584,7 +635,7 @@ func main() {
 		user.SecretKey = ""
 		w.WriteHeader(http.StatusCreated)
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"session": sessionKey,
+			"session": token,
 			"user":    user,
 		})
 
