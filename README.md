@@ -20,8 +20,12 @@
 - Peers need to send Offer and Answer between them, but they need a stabilished communication to do it
 - Then, WebSocket creates this communication
 
+# Test First
+  ` >> go test . -v `
+  - Check if all is alright, no fail
+  
 # How to Compile it
-> If all is alright, you just run use this command in your shell intepreter
+- If all is alright, you just run use this command in your shell intepreter
 ` >> chmod 777 ./run.sh `
 ` >> run.sh [--port] [--ip] [--db.user] [--db.password] `
 
