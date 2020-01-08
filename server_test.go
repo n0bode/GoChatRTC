@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"math/rand"
 	"net/http"
 	"testing"
@@ -195,7 +196,7 @@ func TestJoinRoom(t *testing.T) {
 		users <- createUser(genRandNickname(), t0)
 	})
 
-	var roomID string = "52bdcbe0-25c9-4a33-ab2b-26acee13b239"
+	var roomID string = "8c8c9193-c60d-4114-9333-f5c12c5a83a3"
 	t.Run("Login0", func(t0 *testing.T) {
 		t0.Parallel()
 		var token string = loginUser((<-users).SecretKey, t0)
@@ -309,7 +310,7 @@ func loginUser(secret string, t *testing.T) string {
 }
 
 func joinRoom(token, roomID string, t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second*30)
 	defer cancel()
 
 	header := make(http.Header)
@@ -323,15 +324,17 @@ func joinRoom(token, roomID string, t *testing.T) {
 		t.Fatal(err)
 	}
 	defer conn.Close(websocket.StatusInternalError, "Disconnected")
-	var sucess bool
 
 	peers := make(map[string]*webrtc.PeerConnection)
+	lock := make(chan int, 1)
+	lock <- 0
 	for {
+		if <-lock == 1 {
+			return
+		}
+
 		resp := make(map[string]interface{})
 		if err := wsjson.Read(ctx, conn, &resp); err != nil {
-			if sucess {
-				return
-			}
 			t.Fatal(err)
 		}
 
@@ -363,6 +366,7 @@ func joinRoom(token, roomID string, t *testing.T) {
 			}
 			peers[resp["peerID"].(string)] = peer
 			//fmt.Println("Created offer")
+			lock <- 0
 		case "offer":
 			var config webrtc.Configuration
 			if err := json.Unmarshal([]byte(resp["config"].(string)), &config); err != nil {
@@ -405,9 +409,13 @@ func joinRoom(token, roomID string, t *testing.T) {
 				})
 
 				room.OnMessage(func(msg webrtc.DataChannelMessage) {
-					sucess = true
-					conn.Close(websocket.StatusGoingAway, "Sucess")
+					conn.Close(websocket.StatusInternalError, "Sucess")
+					lock <- 1
 				})
+			})
+
+			peer.OnICECandidate(func(ice *webrtc.ICECandidate) {
+				fmt.Println("Candiate")
 			})
 
 			resp["event"] = "answer"
@@ -415,6 +423,7 @@ func joinRoom(token, roomID string, t *testing.T) {
 			if err = wsjson.Write(ctx, conn, resp); err != nil {
 				t.Fatal(err)
 			}
+			fmt.Println("Send asnwer")
 		case "answer":
 			peer, ok := peers[resp["peerID"].(string)]
 			if !ok {
@@ -436,7 +445,7 @@ func joinRoom(token, roomID string, t *testing.T) {
 				t.Fatal(err)
 			}
 
-			room, err := peer.CreateDataChannel("rrom", nil)
+			room, err := peer.CreateDataChannel("room", nil)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -446,10 +455,20 @@ func joinRoom(token, roomID string, t *testing.T) {
 			})
 
 			room.OnMessage(func(msg webrtc.DataChannelMessage) {
-				sucess = true
-				conn.Close(websocket.StatusGoingAway, "Sucess")
-
+				conn.Close(websocket.StatusInternalError, "Sucess")
+				lock <- 1
 			})
+
+			peer.OnICECandidate(func(candidate *webrtc.ICECandidate) {
+				fmt.Println("Candidate")
+			})
+
+			room.OnError(func(err error) {
+				t.Fail()
+				lock <- 1
+			})
+
+			fmt.Println("Recv answer")
 		}
 	}
 }

@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"flag"
 	"fmt"
 	"io/ioutil"
@@ -14,7 +13,6 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"sync"
 	"time"
 
 	"nhooyr.io/websocket/wsjson"
@@ -106,198 +104,6 @@ func revalidateSession(session *re.Session, sessionKey string, user *chat.User) 
 	return true
 }
 
-func makeToken(sessions map[string]Session, expire time.Duration, userID, ark string) (token string) {
-	var expireTime time.Time = time.Now().Add(expire)
-	token = chat.EncodeToSha(ark + userID)
-	sessions[token] = Session{
-		Expire: expireTime,
-		UserID: userID,
-	}
-	return
-}
-
-func checkToken(sessions map[string]Session, sessionKey string) (auth Session, valid bool) {
-	if auth, valid = sessions[sessionKey]; valid {
-		if valid = (auth.Expire.Sub(time.Now()) >= 0); !valid {
-			delete(sessions, sessionKey)
-		}
-	}
-	return
-}
-
-type Room struct {
-	conns map[string]*websocket.Conn
-	m     *sync.RWMutex
-}
-
-func (r *Room) Store(userID string, conn *websocket.Conn) {
-	r.m.Lock()
-	defer r.m.Unlock()
-	r.conns[userID] = conn
-}
-
-func (r *Room) Load(userID string) (conn *websocket.Conn, ok bool) {
-	r.m.RLock()
-	defer r.m.RUnlock()
-	conn, ok = r.conns[userID]
-	return
-}
-
-func (r *Room) Delete(userID string) {
-	r.m.Lock()
-	defer r.m.Lock()
-	delete(r.conns, userID)
-}
-
-func (r *Room) Range(rfunc func(userID string, conn *websocket.Conn)) {
-	r.m.RLock()
-	defer r.m.RUnlock()
-	for key, conn := range r.conns {
-		rfunc(key, conn)
-	}
-}
-
-func (r *Room) Length() int {
-	r.m.RLock()
-	defer r.m.RUnlock()
-	return len(r.conns)
-}
-
-func NewRoom() *Room {
-	return &Room{
-		conns: make(map[string]*websocket.Conn),
-		m:     &sync.RWMutex{},
-	}
-}
-
-type RoomManager struct {
-	rooms map[string]*Room
-	m     *sync.RWMutex
-}
-
-func (rm *RoomManager) Store(roomID string) (room *Room) {
-	rm.m.Lock()
-	defer rm.m.Unlock()
-
-	if _, ok := rm.rooms[roomID]; !ok {
-		room = NewRoom()
-		rm.rooms[roomID] = room
-	}
-	return
-}
-
-func (rm *RoomManager) Load(roomID string) (room *Room, ok bool) {
-	rm.m.RLock()
-	defer rm.m.RUnlock()
-	room, ok = rm.rooms[roomID]
-	return
-}
-
-func (rm *RoomManager) Delete(roomID string) {
-	rm.m.Lock()
-	defer rm.m.Unlock()
-	delete(rm.rooms, roomID)
-}
-
-func NewRoomManager() *RoomManager {
-	return &RoomManager{
-		rooms: make(map[string]*Room),
-		m:     &sync.RWMutex{},
-	}
-}
-
-type SessionManager struct {
-	m        *sync.RWMutex
-	ark      string
-	sessions map[string]Session
-}
-
-func (sm *SessionManager) Add(expire time.Duration, userID string) (token string) {
-	var future time.Time = time.Now().Add(expire)
-	token = chat.EncodeToSha(sm.ark + userID)
-	sm.m.Lock()
-	sm.sessions[token] = Session{
-		Expire: future,
-		UserID: userID,
-	}
-	sm.m.Unlock()
-	return
-}
-
-func (sm *SessionManager) IsValid(token string) (auth Session, valid bool) {
-	sm.m.RLock()
-	if auth, valid = sm.sessions[token]; valid {
-		if valid = (auth.Expire.Sub(time.Now()) >= 0); !valid {
-			delete(sm.sessions, token)
-		}
-	}
-	sm.m.RUnlock()
-	return
-}
-
-func NewSessionManager() *SessionManager {
-	return &SessionManager{
-		ark:      chat.EncodeToSha(time.Now().Add(time.Second * time.Duration(rand.Int())).Format(time.RFC3339Nano)),
-		sessions: make(map[string]Session),
-		m:        &sync.RWMutex{},
-	}
-}
-
-type Hub struct {
-	peers map[string]*websocket.Conn
-	m     *sync.RWMutex
-}
-
-func (h *Hub) Add(userID string, conn *websocket.Conn) {
-	h.m.Lock()
-	defer h.m.Unlock()
-	h.peers[userID] = conn
-}
-
-func (h *Hub) Rem(userID string) {
-	h.m.Lock()
-	defer h.m.Unlock()
-	if _, ok := h.peers[userID]; ok {
-		delete(h.peers, userID)
-	}
-}
-
-func (h *Hub) WriteTo(ctx context.Context, event string, message interface{}, to string) (err error) {
-	h.m.RLock()
-	defer h.m.RUnlock()
-	if peer, ok := h.peers[to]; ok {
-		err = wsjson.Write(ctx, peer, map[string]interface{}{
-			"event":   event,
-			"message": message,
-		})
-		return
-	}
-	return errors.New("Peer not found")
-}
-
-func (h *Hub) Write(ctx context.Context, event string, message interface{}) {
-	h.m.RLock()
-	defer h.m.RUnlock()
-	for _, peer := range h.peers {
-		wsjson.Write(ctx, peer, map[string]interface{}{
-			"event":   event,
-			"message": message,
-		})
-	}
-}
-
-func NewHub() *Hub {
-	return &Hub{
-		m:     &sync.RWMutex{},
-		peers: make(map[string]*websocket.Conn),
-	}
-}
-
-type Session struct {
-	Expire time.Time
-	UserID string
-}
-
 func main() {
 	//Flags to command line
 	host := flag.String("host", "", "Public Address")
@@ -318,19 +124,26 @@ func main() {
 	log.Printf("Read '%d' files\n", len(staticFiles))
 
 	//Session
-	sessionManager := NewSessionManager()
+	sm := chat.NewSessionManager()
 
 	//Hub connecteds
-	hub := NewHub()
+	hub := chat.NewHub()
 
 	//Rooms
-	rooms := NewRoomManager()
+	rooms := chat.NewRoomManager()
 
 	//Create WebRTC Settings
 	configRTC, err := json.Marshal(map[string]interface{}{
 		"iceServers": []map[string]interface{}{
 			map[string]interface{}{
-				"urls": []string{"stun:stun.l.google.com:19302"},
+				"urls":       []string{"stun:numb.viagenie.ca"},
+				"username":   "paulorcamacan@gmail.com",
+				"credential": "swordfish",
+			},
+			map[string]interface{}{
+				"urls":       []string{"turn:numb.viagenie.ca"},
+				"username":   "paulorcamacan@gmail.com",
+				"credential": "swordfish",
 			},
 		},
 	})
@@ -377,7 +190,7 @@ func main() {
 	}).Methods("GET")
 
 	/*** Create Room  ***/
-	route.HandleFunc("/rooms/{roomID}/join", func(w http.ResponseWriter, r *http.Request) {
+	route.HandleFunc("/rooms/{roomID}/join", sm.Middleware(func(w http.ResponseWriter, r *http.Request) {
 		conn, err := websocket.Accept(w, r, nil)
 		if err != nil {
 			log.Println(err)
@@ -388,26 +201,12 @@ func main() {
 		ctx, close := context.WithCancel(context.Background())
 		defer close()
 
-		token := r.Header.Get("Authorization")
-		if len(token) == 0 {
-			log.Println("Session not especific")
-			w.WriteHeader(http.StatusNonAuthoritativeInfo)
-			conn.Close(websocket.StatusInternalError, "Session not especificed")
-			return
-		}
-
-		auth, valid := sessionManager.IsValid(token)
-		if !valid {
-			log.Println("Session is not valid")
-			w.WriteHeader(http.StatusUnauthorized)
-			conn.Close(websocket.StatusInternalError, "Session is not valid")
-			return
-		}
-
+		userID := r.Header.Get("userID")
 		parms := mux.Vars(r)
+
 		info, err := re.DB("chat").Table("rooms").Get(parms["roomID"]).Update(
 			map[string]interface{}{
-				"peers": re.Row.Field("peers").SetInsert(auth.UserID),
+				"peers": re.Row.Field("peers").SetInsert(userID),
 			},
 		).RunWrite(session)
 		if err != nil || info.Skipped == 1 {
@@ -422,40 +221,55 @@ func main() {
 		}
 
 		wait := make(chan int, 1)
-
+		fmt.Println(room.Length())
 		//If already exists connected peers
 		if room.Length() > 0 {
 			//Set userID
 			resp := map[string]interface{}{
 				"event":     "create_offer",
-				"requester": auth.UserID,
+				"requester": userID,
 				"config":    string(configRTC),
 			}
-			log.Println("connected")
 
 			//Send Offer all peer
-			room.Range(func(userID string, peer *websocket.Conn) {
-				if userID == auth.UserID {
+			room.Range(func(peerID string, peer *websocket.Conn) {
+				if userID == peerID {
 					return
 				}
-
-				resp["peerID"] = userID
+				log.Println("send")
+				resp["peerID"] = peerID
 				if err = wsjson.Write(ctx, conn, resp); err != nil {
-					log.Println(err)
+					room.Delete(peerID)
+					re.DB("chat").Table("rooms").Get(parms["roomID"]).Update(func(d re.Term) interface{} {
+						return map[string]interface{}{
+							"peers": re.Row.Field("peers").Filter(func(a re.Term) interface{} {
+								return a.Ne(peerID)
+							}),
+						}
+					}).Exec(session)
+					fmt.Println("erro")
 					return
 				}
 			})
 		}
-		room.Store(auth.UserID, conn)
+		room.Store(userID, conn)
 
 		go func() {
 			ctx, cancel := context.WithCancel(context.Background())
-			resp := make(map[string]interface{})
 
 			defer cancel()
 			for {
+				resp := make(map[string]interface{})
 				if err := wsjson.Read(ctx, conn, &resp); err != nil {
-					log.Println(err)
+					room.Delete(userID)
+					//Remove User from Room peers list
+					re.DB("chat").Table("rooms").Get(parms["roomID"]).Update(func(d re.Term) interface{} {
+						return map[string]interface{}{
+							"peers": d.Field("peers").Filter(func(a re.Term) interface{} {
+								return a.Ne(userID)
+							}),
+						}
+					}).RunWrite(session)
 					wait <- 0
 					return
 				}
@@ -466,8 +280,10 @@ func main() {
 					if !exists {
 						continue
 					}
-					wsjson.Write(ctx, peer, resp)
-					fmt.Println("Recv Answer")
+					if err := wsjson.Write(ctx, peer, resp); err != nil {
+						fmt.Println(err)
+					}
+					fmt.Println("Send answer")
 				case "offer":
 					peer, exists := room.Load(resp["peerID"].(string))
 					if !exists {
@@ -476,33 +292,19 @@ func main() {
 					if err := wsjson.Write(ctx, peer, resp); err != nil {
 						fmt.Println(err)
 					}
-					log.Println("Sent offer")
+					fmt.Println("Send offer")
 				}
 			}
 		}()
-
-		room.Store(auth.UserID, conn)
+		room.Store(userID, conn)
 		<-wait
-	})
+	}))
 
 	//Create room
-	route.HandleFunc("/rooms", func(w http.ResponseWriter, r *http.Request) {
+	route.HandleFunc("/rooms", sm.Middleware(func(w http.ResponseWriter, r *http.Request) {
 		setHeaderJSON(w)
 		defer r.Body.Close()
-
-		token := r.Header.Get("Authorization")
-		if len(token) == 0 {
-			log.Println("Token not specificated")
-			w.WriteHeader(http.StatusNonAuthoritativeInfo)
-			return
-		}
-
-		auth, valid := sessionManager.IsValid(token)
-		if !valid {
-			log.Println("Session is not valid")
-			w.WriteHeader(http.StatusUnauthorized)
-			return
-		}
+		var userID string = r.Header.Get("userID")
 
 		data := make(map[string]interface{})
 		if err := json.NewDecoder(r.Body).Decode(&data); err != nil {
@@ -514,7 +316,7 @@ func main() {
 		result, err := re.DB("chat").Table("rooms").Insert(map[string]interface{}{
 			"name":  data["roomName"],
 			"peers": []string{},
-			"owner": auth.UserID,
+			"owner": userID,
 		}).RunWrite(session)
 
 		if err != nil {
@@ -527,7 +329,7 @@ func main() {
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"roomID": result.GeneratedKeys[0],
 		})
-	}).Methods("POST")
+	})).Methods("POST")
 
 	/* Room Get Info */
 	route.HandleFunc("/rooms/{roomID}", func(w http.ResponseWriter, r *http.Request) {
@@ -549,7 +351,7 @@ func main() {
 			return
 		}
 
-		var roomInfo chat.Room
+		var roomInfo chat.RoomInfo
 		if err = cursor.One(&roomInfo); err != nil {
 			log.Println(err)
 			w.WriteHeader(http.StatusBadRequest)
@@ -560,22 +362,9 @@ func main() {
 		json.NewEncoder(w).Encode(roomInfo)
 	}).Methods("GET")
 
-	route.HandleFunc("/invite", func(w http.ResponseWriter, r *http.Request) {
+	route.HandleFunc("/invite", sm.Middleware(func(w http.ResponseWriter, r *http.Request) {
 		setHeaderJSON(w)
-
-		token := r.Header.Get("Authorization")
-		if len(token) == 0 {
-			w.WriteHeader(http.StatusNonAuthoritativeInfo)
-			log.Println("Session not specificted")
-			return
-		}
-
-		auth, valid := sessionManager.IsValid(token)
-		if !valid {
-			log.Println("Session key is not valid")
-			w.WriteHeader(http.StatusUnauthorized)
-			return
-		}
+		var userID string = r.Header.Get("userID")
 
 		resp := make(map[string]interface{})
 		if err := json.NewDecoder(r.Body).Decode(&resp); err != nil {
@@ -584,14 +373,14 @@ func main() {
 			return
 		}
 
-		if auth.UserID == resp["to"] {
+		if userID == resp["to"] {
 			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
 
 		inviteInfo := map[string]interface{}{
 			"roomID": resp["roomID"],
-			"from":   auth.UserID,
+			"from":   userID,
 		}
 
 		err := re.DB("chat").Table("users").Filter(re.Row.Field("userID").Eq(resp["to"])).Update(
@@ -609,23 +398,11 @@ func main() {
 
 		hub.WriteTo(ctx, "invite", inviteInfo, resp["to"].(string))
 		w.WriteHeader(http.StatusCreated)
-	}).Methods("POST")
+	})).Methods("POST")
 
 	/*** JOIN HUB ***/
-	route.HandleFunc("/hub/join", func(w http.ResponseWriter, r *http.Request) {
-		token := r.Header.Get("Authorization")
-		if len(token) == 0 {
-			log.Println("Token is not especificed")
-			w.WriteHeader(http.StatusNonAuthoritativeInfo)
-			return
-		}
-
-		auth, valid := sessionManager.IsValid(token)
-		if !valid {
-			log.Println("Session is not valid")
-			w.WriteHeader(http.StatusUnauthorized)
-			return
-		}
+	route.HandleFunc("/hub/join", sm.Middleware(func(w http.ResponseWriter, r *http.Request) {
+		var userID string = r.Header.Get("userID")
 
 		conn, err := websocket.Accept(w, r, nil)
 		if err != nil {
@@ -644,41 +421,16 @@ func main() {
 			return
 		}
 
-		cursor, err := re.DB("chat").Table("users").Filter(re.Row.Field("userID").Eq(auth.UserID)).Count().Run(session)
-		if err != nil {
-			conn.Close(websocket.StatusInternalError, "DB error")
-			log.Println(err)
-			return
-		}
-
-		if cursor.IsNil() {
-			conn.Close(websocket.StatusInternalError, "User not exists")
-			return
-		}
-
-		var count int
-		if err := cursor.One(&count); err != nil {
-			log.Println(err)
-			conn.Close(websocket.StatusInternalError, "DB error")
-			return
-		}
-
-		if count == 0 {
-			log.Println("secret key is invalid")
-			conn.Close(websocket.StatusInternalError, "Key is not valid")
-			return
-		}
-
 		//Connected to HUB
-		hub.Add(auth.UserID, conn)
+		hub.Add(userID, conn)
 		for {
 			if err = wsjson.Read(ctx, conn, &data); err != nil {
-				hub.Rem(auth.UserID)
-				log.Printf("Disconnected from hub: %s\n", auth.UserID)
+				hub.Rem(userID)
+				log.Printf("Disconnected from hub: %s\n", userID)
 				return
 			}
 		}
-	})
+	}))
 
 	route.HandleFunc("/auth/login", func(w http.ResponseWriter, r *http.Request) {
 		setHeaderJSON(w)
@@ -709,7 +461,7 @@ func main() {
 			return
 		}
 
-		token := sessionManager.Add(time.Minute*15, user.UserID)
+		token := sm.Store(time.Minute*15, user.UserID)
 		re.DB("chat").Table("users").Get(user.ID).Update(map[string]interface{}{
 			"lasttime": time.Now().Format(time.RFC3339),
 		}).Exec(session)
@@ -796,7 +548,7 @@ func main() {
 		if err := json.NewEncoder(w).Encode(&userData); err != nil {
 			log.Println(err)
 		}
-	})
+	}).Methods("POST")
 
 	route.HandleFunc("/users", func(w http.ResponseWriter, r *http.Request) {
 		cursor, err := re.DB("chat").Table("users").Filter(re.Row.Field("id").Fill()).Run(session)
@@ -813,6 +565,33 @@ func main() {
 		}
 		json.NewEncoder(w).Encode(users)
 	}).Methods("GET")
+
+	route.HandleFunc("/users/{userID}/addfriend", sm.Middleware(func(w http.ResponseWriter, r *http.Request) {
+		var userID string = r.Header.Get("userID")
+		defer r.Body.Close()
+
+		info := make(map[string]interface{})
+		if err := json.NewDecoder(r.Body).Decode(&info); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+
+		writeInfo, err := re.DB("chat").Table("users").Filter(re.Row.Field("userID").Eq(userID)).Update(map[string]interface{}{
+			"friends": re.Row.Field("friends").SetInsert(info["user"]),
+		}).RunWrite(session)
+
+		if err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+
+		if writeInfo.Unchanged == 1 {
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
+
+		w.WriteHeader(http.StatusCreated)
+	})).Methods("POST")
 
 	route.HandleFunc("/users/{userID}", func(w http.ResponseWriter, r *http.Request) {
 		parms := mux.Vars(r)

@@ -1,5 +1,6 @@
 package chat
 
+// User is a struct to know about user
 type User struct {
 	ID        string   `rethinkdb:"id,omitempty" json:"-"`
 	Name      string   `rethinkdb:"name" json:"name"`

@@ -17,15 +17,27 @@
     }
   </script>
   <style type="text/css">
+    @keyframes pulsing{
+      50%{
+        box-shadow: 0px 0px 0px 5px#f2008944;
+        transform: scale(1.05);
+      }
+
+      100%{
+        box-shadow: 0px 0px 0px 0px #f20089;
+      }
+    }
+
     body{
       margin: 0;
       padding: 0;
+      background: radial-gradient(at top left, #f20089 50%, white 50.1%, transparent 100%);
+      background-origin: 50px 50px;
     }
 
     #topbar{
       height: 25px;
-      background: black;
-      box-shadow: black 0px 0px 5px;
+      background:transparent;
       color:white;
       font-family: 'Courier New', Courier, monospace;
       font-size: 15pt;
@@ -74,22 +86,22 @@
       height: 25px;
       width: 80px;
       border-radius: 2px;
-      color:#333;
+      color:white;
       font-weight: 500;
+      background-color: #f20089;
+      border: 1px solid white;
+      box-shadow: 0px 0px 0px 0px white;
+      font-weight: bold;
+    }
+
+    #topbar button:hover{
+      animation: pulsing 1s linear infinite;
     }
 
     #topbar > div{
       float:right;
     }
 
-    #topbar #btnlogin{
-      background-color: rgb(144, 243, 149);
-    }
-
-    #topbar #btnsign{
-      background-color: rgb(159, 181, 245);
-    }
-    
     #friends-box{
       transition: 1s;
       position: absolute;
@@ -312,19 +324,60 @@
     .dropdown .item .text{
       display: inline-block;
     }
+
+    .cloud{
+      font-family: 'Courier New', Courier, monospace;   
+      font-weight: 500;
+      color:white;
+      margin: 50px;
+      font-size: 20pt;
+    }
+  
+    .waves{
+      position: absolute;
+      z-index: -1;
+      top: 0;
+      left: 0;
+    }
+
+    .waves *{
+      width: 2300px;
+      height: 2000px;
+      background:#f20089;
+      border-radius:700px;
+      left: -850;
+      top: -1400;
+      position: absolute;
+    }
+
+    .cloud ul{
+      list-style-type: none;
+    }
+
+    .cloud li::before{
+      content:'>>';
+      color: white;
+      font-size: 12pt;
+    }
+
   </style>
 </head>
 <body>
+  <div class="waves">
+    <div  ></div>
+    <div></div>
+    <div></div>
+  </div>
   <div id="topbar" onmousedown="return false;">
     <h1> Crypt&#8709;</h1>
     <!--<div class="invitebox"></div>
-    <div id="username">Nobode</div>
     -->
+
     <div id="box-button">
-      <button id="btnlogin"> login </button>
-      <button id="btnsign"> sign </button>
+      <button id="btnlogin"> Login </button>
     </div>
   </div>
+  
   <ul class="dropdown">
     <li class="item">
       <span class="icon"></span>
@@ -343,12 +396,17 @@
       <span class="text"></span>
     </li>
   </ul>
-  <div>
-    <form>
-      <label> </label>
-      <input type="text">
-      <input type="submit"> </input>
-    </form>
+
+  <div class="cloud">
+    <span> Crytpo is a peer to peer opensource chat</span>
+    <ul>
+      <li> Use webrtc to create communication between the peers </li>
+      <li> It's secure, we don't need your datas </li>
+      <li> All communication is hardly crypted </li> 
+    </ul>
+  </div>
+  <div id="homepage">
+    
   </div>
   <div id="chat-center" style="display:none">
     <div class="room-list">
